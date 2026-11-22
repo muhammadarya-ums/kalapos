@@ -10,7 +10,7 @@ export default async function PosLayout({ children }: { children: React.ReactNod
     redirect("/login?next=/pos")
   }
   if (session.role !== "OWNER") {
-    if (!session.branchId || !findActiveBranchServer(session.branchId)) {
+    if (!session.branchId || !(await findActiveBranchServer(session.branchId))) {
       redirect("/login")
     }
   }

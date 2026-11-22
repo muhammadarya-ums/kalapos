@@ -4,6 +4,7 @@ import { cookies } from "next/headers"
 import { hashPassword, hashPinSecure } from "./crypto"
 import { generateId } from "./format"
 import { SESSION_COOKIE_NAME, verifySessionToken } from "./session-server"
+import { getSupabaseAdmin } from "./supabase-server"
 import type { Role, SessionUser, User } from "./types"
 
 export interface ServerUserRecord {
@@ -26,6 +27,7 @@ const STAFF_FILE = path.join(DATA_DIR, "kala-auth.json")
 interface GlobalAuthStore {
   staffCache: ServerUserRecord[] | null
   rateLimits: Map<string, { count: number; resetAt: number }>
+  ownerSyncedFingerprint: string | null
 }
 
 const g = globalThis as unknown as { __kalaAuthStore?: GlobalAuthStore }
@@ -33,6 +35,7 @@ if (!g.__kalaAuthStore) {
   g.__kalaAuthStore = {
     staffCache: null,
     rateLimits: new Map(),
+    ownerSyncedFingerprint: null,
   }
 }
 
@@ -47,7 +50,7 @@ function constantTimeEqual(a: string, b: string): boolean {
 
 /**
  * Single official Owner account for Kafe Kala.
- * Configurable via environment variables for production deployment.
+ * Configurable via KALA_OWNER_* environment variables for production deployment.
  */
 export function getOwnerRecord(): ServerUserRecord {
   const email = (process.env.KALA_OWNER_EMAIL?.trim() || "owner@kala.id").toLowerCase()
@@ -65,6 +68,32 @@ export function getOwnerRecord(): ServerUserRecord {
     pin_hash: hashPinSecure(pin),
     is_active: true,
     created_at: "2026-01-01T01:00:00.000Z",
+  }
+}
+
+async function ensureOwnerSyncedInSupabase(): Promise<void> {
+  const supabase = getSupabaseAdmin()
+  if (!supabase) return
+  const owner = getOwnerRecord()
+  const fp = `${owner.email}|${owner.password_hash}|${owner.pin_hash}|${owner.full_name}`
+  if (g.__kalaAuthStore!.ownerSyncedFingerprint === fp) return
+
+  const { error } = await supabase.from("kala_users").upsert(
+    {
+      id: owner.id,
+      branch_id: null,
+      full_name: owner.full_name,
+      email: owner.email,
+      password_hash: owner.password_hash,
+      role: "OWNER",
+      pin_hash: owner.pin_hash,
+      is_active: true,
+      created_at: owner.created_at,
+    },
+    { onConflict: "id" }
+  )
+  if (!error) {
+    g.__kalaAuthStore!.ownerSyncedFingerprint = fp
   }
 }
 
@@ -120,26 +149,82 @@ export function sanitizeUser(record: ServerUserRecord): User {
   }
 }
 
-export function listAllServerUsers(): ServerUserRecord[] {
-  return [getOwnerRecord(), ...readStaffFromDisk()]
+export async function listAllServerUsers(): Promise<ServerUserRecord[]> {
+  const owner = getOwnerRecord()
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    await ensureOwnerSyncedInSupabase()
+    const { data, error } = await supabase
+      .from("kala_users")
+      .select("*")
+      .neq("role", "OWNER")
+      .order("created_at", { ascending: true })
+
+    if (!error && data) {
+      return [
+        owner,
+        ...data.map((row) => ({
+          id: row.id,
+          branch_id: row.branch_id,
+          full_name: row.full_name,
+          email: row.email,
+          password_hash: row.password_hash,
+          role: row.role as Role,
+          pin_hash: row.pin_hash,
+          is_active: row.is_active,
+          created_at: row.created_at,
+        })),
+      ]
+    }
+  }
+  return [owner, ...readStaffFromDisk()]
 }
 
-export function listAllUsersSanitized(): User[] {
-  return listAllServerUsers().map(sanitizeUser)
+export async function listAllUsersSanitized(): Promise<User[]> {
+  const users = await listAllServerUsers()
+  return users.map(sanitizeUser)
 }
 
-export function findServerUserById(userId: string): ServerUserRecord | null {
-  return listAllServerUsers().find((u) => u.id === userId) ?? null
+export async function findServerUserById(userId: string): Promise<ServerUserRecord | null> {
+  if (userId === KALA_OWNER_ID) {
+    await ensureOwnerSyncedInSupabase()
+    return getOwnerRecord()
+  }
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { data, error } = await supabase
+      .from("kala_users")
+      .select("*")
+      .eq("id", userId)
+      .maybeSingle()
+
+    if (!error && data) {
+      return {
+        id: data.id,
+        branch_id: data.branch_id,
+        full_name: data.full_name,
+        email: data.email,
+        password_hash: data.password_hash,
+        role: data.role as Role,
+        pin_hash: data.pin_hash,
+        is_active: data.is_active,
+        created_at: data.created_at,
+      }
+    }
+    if (!error) return null
+  }
+  const all = await listAllServerUsers()
+  return all.find((u) => u.id === userId) ?? null
 }
 
-export function findActiveUserById(userId: string): ServerUserRecord | null {
-  const found = findServerUserById(userId)
+export async function findActiveUserById(userId: string): Promise<ServerUserRecord | null> {
+  const found = await findServerUserById(userId)
   return found && found.is_active ? found : null
 }
 
 /**
  * Verifies the HttpOnly signed session cookie AND confirms the user still exists
- * and remains active in the server-side Kafe Kala registry.
+ * and remains active in Kafe Kala's database registry.
  */
 export async function getAuthenticatedServerSession(): Promise<SessionUser | null> {
   const cookieStore = await cookies()
@@ -147,7 +232,7 @@ export async function getAuthenticatedServerSession(): Promise<SessionUser | nul
   const parsed = await verifySessionToken(rawToken)
   if (!parsed) return null
 
-  const activeUser = findActiveUserById(parsed.userId)
+  const activeUser = await findActiveUserById(parsed.userId)
   if (!activeUser) return null
 
   return {
@@ -193,12 +278,13 @@ export function clearAuthFailures(key: string): void {
   g.__kalaAuthStore!.rateLimits.delete(key)
 }
 
-export function verifyEmailCredentials(
+export async function verifyEmailCredentials(
   email: string,
   password: string
-): { ok: true; user: ServerUserRecord } | { ok: false; error: string } {
+): Promise<{ ok: true; user: ServerUserRecord } | { ok: false; error: string }> {
   const normalized = email.trim().toLowerCase()
-  const user = listAllServerUsers().find((u) => u.email.toLowerCase() === normalized)
+  const allUsers = await listAllServerUsers()
+  const user = allUsers.find((u) => u.email.toLowerCase() === normalized)
   if (!user) {
     return { ok: false, error: "Email atau kata sandi tidak sesuai." }
   }
@@ -214,16 +300,17 @@ export function verifyEmailCredentials(
   return { ok: true, user }
 }
 
-export function verifyPinCredentials(
+export async function verifyPinCredentials(
   pin: string,
   branchId: string
-): { ok: true; user: ServerUserRecord } | { ok: false; error: string } {
+): Promise<{ ok: true; user: ServerUserRecord } | { ok: false; error: string }> {
   const cleanPin = pin.trim()
   if (!/^\d{4}$/.test(cleanPin)) {
     return { ok: false, error: "PIN harus terdiri dari 4 digit angka." }
   }
   const providedHash = hashPinSecure(cleanPin)
-  const activeUsers = listAllServerUsers().filter(
+  const allUsers = await listAllServerUsers()
+  const activeUsers = allUsers.filter(
     (u) => u.is_active && constantTimeEqual(u.pin_hash, providedHash)
   )
 
@@ -238,16 +325,17 @@ export function verifyPinCredentials(
   return { ok: true, user: matched }
 }
 
-export function verifySupervisorPinServer(
+export async function verifySupervisorPinServer(
   pin: string,
   branchId?: string | null
-): { ok: true; supervisor: User } | { ok: false; error: string } {
+): Promise<{ ok: true; supervisor: User } | { ok: false; error: string }> {
   const cleanPin = pin.trim()
   if (!/^\d{4}$/.test(cleanPin)) {
     return { ok: false, error: "PIN Supervisor harus 4 digit angka." }
   }
   const providedHash = hashPinSecure(cleanPin)
-  const candidates = listAllServerUsers().filter(
+  const allUsers = await listAllServerUsers()
+  const candidates = allUsers.filter(
     (u) =>
       u.is_active &&
       (u.role === "OWNER" || u.role === "MANAGER") &&
@@ -274,9 +362,9 @@ export interface CreateStaffServerInput {
   pin: string
 }
 
-export function createStaffAccountServer(
+export async function createStaffAccountServer(
   input: CreateStaffServerInput
-): { ok: true; user: User; users: User[] } | { ok: false; error: string } {
+): Promise<{ ok: true; user: User; users: User[] } | { ok: false; error: string }> {
   const fullName = input.fullName.trim()
   const email = input.email.trim().toLowerCase()
   const pin = input.pin.trim()
@@ -299,7 +387,7 @@ export function createStaffAccountServer(
     return { ok: false, error: "Pilih cabang operasional Kafe Kala untuk staf ini." }
   }
 
-  const allUsers = listAllServerUsers()
+  const allUsers = await listAllServerUsers()
   if (allUsers.some((u) => u.email.toLowerCase() === email)) {
     return { ok: false, error: "Email tersebut sudah digunakan akun lain." }
   }
@@ -331,22 +419,71 @@ export function createStaffAccountServer(
     created_at: new Date().toISOString(),
   }
 
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { error } = await supabase.from("kala_users").insert(newRecord)
+    if (error) {
+      return { ok: false, error: `Gagal menyimpan akun staf ke Supabase: ${error.message}` }
+    }
+    return {
+      ok: true,
+      user: sanitizeUser(newRecord),
+      users: await listAllUsersSanitized(),
+    }
+  }
+
   const nextStaff = [...readStaffFromDisk(), newRecord]
   writeStaffToDisk(nextStaff)
 
   return {
     ok: true,
     user: sanitizeUser(newRecord),
-    users: listAllUsersSanitized(),
+    users: await listAllUsersSanitized(),
   }
 }
 
-export function toggleStaffActiveServer(
+export async function toggleStaffActiveServer(
   userId: string
-): { ok: true; user: User; users: User[] } | { ok: false; error: string } {
+): Promise<{ ok: true; user: User; users: User[] } | { ok: false; error: string }> {
   if (userId === KALA_OWNER_ID) {
     return { ok: false, error: "Akun Owner utama Kafe Kala tidak dapat dinonaktifkan." }
   }
+
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { data: existing, error: fetchErr } = await supabase
+      .from("kala_users")
+      .select("*")
+      .eq("id", userId)
+      .neq("role", "OWNER")
+      .maybeSingle()
+
+    if (fetchErr || !existing) {
+      return { ok: false, error: "Akun staf tidak ditemukan." }
+    }
+
+    const nextActive = !existing.is_active
+    const { data: updated, error: updateErr } = await supabase
+      .from("kala_users")
+      .update({ is_active: nextActive })
+      .eq("id", userId)
+      .select("*")
+      .single()
+
+    if (updateErr || !updated) {
+      return { ok: false, error: "Gagal mengubah status akun staf di Supabase." }
+    }
+
+    return {
+      ok: true,
+      user: sanitizeUser({
+        ...updated,
+        role: updated.role as Role,
+      }),
+      users: await listAllUsersSanitized(),
+    }
+  }
+
   const staff = readStaffFromDisk()
   const idx = staff.findIndex((u) => u.id === userId)
   if (idx < 0) return { ok: false, error: "Akun staf tidak ditemukan." }
@@ -358,26 +495,55 @@ export function toggleStaffActiveServer(
   return {
     ok: true,
     user: sanitizeUser(updated),
-    users: listAllUsersSanitized(),
+    users: await listAllUsersSanitized(),
   }
 }
 
-export function deleteStaffAccountServer(
+export async function deleteStaffAccountServer(
   userId: string
-): { ok: true; users: User[] } | { ok: false; error: string } {
+): Promise<{ ok: true; users: User[] } | { ok: false; error: string }> {
   if (userId === KALA_OWNER_ID) {
     return { ok: false, error: "Akun Owner utama Kafe Kala tidak dapat dihapus." }
   }
+
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { data, error } = await supabase
+      .from("kala_users")
+      .delete()
+      .eq("id", userId)
+      .neq("role", "OWNER")
+      .select("id")
+
+    if (error) {
+      return { ok: false, error: `Gagal menghapus akun staf di Supabase: ${error.message}` }
+    }
+    if (!data || data.length === 0) {
+      return { ok: false, error: "Akun staf tidak ditemukan." }
+    }
+    return { ok: true, users: await listAllUsersSanitized() }
+  }
+
   const staff = readStaffFromDisk()
   if (!staff.some((u) => u.id === userId)) {
     return { ok: false, error: "Akun staf tidak ditemukan." }
   }
   const nextStaff = staff.filter((u) => u.id !== userId)
   writeStaffToDisk(nextStaff)
-  return { ok: true, users: listAllUsersSanitized() }
+  return { ok: true, users: await listAllUsersSanitized() }
 }
 
-export function unassignBranchFromStaffServer(branchId: string): void {
+export async function unassignBranchFromStaffServer(branchId: string): Promise<void> {
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    await supabase
+      .from("kala_users")
+      .update({ branch_id: null, is_active: false })
+      .eq("branch_id", branchId)
+      .neq("role", "OWNER")
+    return
+  }
+
   const staff = readStaffFromDisk()
   let changed = false
   const nextStaff = staff.map((u) => {

@@ -91,9 +91,9 @@ export function ShiftManager() {
     }
   }, [activeShift, state.orders])
 
-  const handleOpenShift = (e: React.FormEvent) => {
+  const handleOpenShift = async (e: React.FormEvent) => {
     e.preventDefault()
-    const res = openShift(openingCash, openNotes)
+    const res = await openShift(openingCash, openNotes)
     if (!res.ok) {
       toast(res.error || "Gagal membuka shift.", "error")
       return
@@ -102,10 +102,10 @@ export function ShiftManager() {
     setOpenNotes("")
   }
 
-  const handleBlindClose = (e: React.FormEvent) => {
+  const handleBlindClose = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!activeShift) return
-    const res = closeShiftBlind(activeShift.id, actualCash, closeNotes)
+    const res = await closeShiftBlind(activeShift.id, actualCash, closeNotes)
     if (!res.ok || !res.data) {
       toast(res.error || "Gagal menutup shift.", "error")
       return

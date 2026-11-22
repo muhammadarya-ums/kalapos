@@ -25,13 +25,13 @@ export async function GET(request: NextRequest) {
   }
 
   // Re-validate user status against server-side Kafe Kala registry
-  const activeUser = findActiveUserById(parsed.userId)
+  const activeUser = await findActiveUserById(parsed.userId)
   if (!activeUser) {
     return clearSessionResponse()
   }
 
   if (activeUser.role !== "OWNER") {
-    if (!activeUser.branch_id || !findActiveBranchServer(activeUser.branch_id)) {
+    if (!activeUser.branch_id || !(await findActiveBranchServer(activeUser.branch_id))) {
       return clearSessionResponse()
     }
   }

@@ -31,7 +31,7 @@ export async function POST(request: NextRequest) {
     const pin = typeof body.pin === "string" ? body.pin : ""
     const branchId = typeof body.branchId === "string" ? body.branchId : session.branchId
 
-    const res = verifySupervisorPinServer(pin, branchId)
+    const res = await verifySupervisorPinServer(pin, branchId)
     if (!res.ok) {
       recordAuthFailure(rateKey)
       return NextResponse.json({ ok: false, error: res.error }, { status: 401 })

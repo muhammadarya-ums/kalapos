@@ -15,6 +15,7 @@ import {
   updateIngredientServer,
   type IngredientUpsertServerInput,
 } from "@/lib/kalapos/inventory-server"
+import { getOperationsSnapshotServer } from "@/lib/kalapos/operations-server"
 
 function canManageCatalog(role: string): role is "OWNER" | "MANAGER" {
   return role === "OWNER" || role === "MANAGER"
@@ -28,8 +29,8 @@ export async function GET() {
 
   const inventory =
     session.role === "OWNER"
-      ? getInventoryServer()
-      : getScopedInventoryServer(session.branchId)
+      ? await getInventoryServer()
+      : await getScopedInventoryServer(session.branchId)
 
   return NextResponse.json({ ok: true, inventory }, { status: 200 })
 }
@@ -62,14 +63,14 @@ export async function POST(request: NextRequest) {
           { status: 403 }
         )
       }
-      const allBranchIds = listBranchesServer()
+      const allBranchIds = (await listBranchesServer())
         .filter((b) => !b.deleted_at)
         .map((b) => b.id)
 
       const targetBranchId =
         session.role === "MANAGER" ? session.branchId : body.input.branch_id ?? null
 
-      const res = createIngredientServer(
+      const res = await createIngredientServer(
         {
           ...body.input,
           branch_id: targetBranchId,
@@ -81,7 +82,7 @@ export async function POST(request: NextRequest) {
       if (!res.ok) return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
 
       const inventory =
-        session.role === "OWNER" ? res.inventory : getScopedInventoryServer(session.branchId)
+        session.role === "OWNER" ? res.inventory : await getScopedInventoryServer(session.branchId)
       return NextResponse.json(
         { ok: true, ingredient: res.ingredient, inventory },
         { status: 201 }
@@ -100,7 +101,7 @@ export async function POST(request: NextRequest) {
       }
 
       if (body.type === "OPNAME") {
-        const pinCheck = verifySupervisorPinServer(body.supervisorPin ?? "", targetBranchId)
+        const pinCheck = await verifySupervisorPinServer(body.supervisorPin ?? "", targetBranchId)
         if (!pinCheck.ok) {
           return NextResponse.json(
             { ok: false, error: pinCheck.error || "PIN Supervisor tidak valid." },
@@ -109,7 +110,7 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      const res = adjustBranchStockServer({
+      const res = await adjustBranchStockServer({
         branch_id: targetBranchId,
         shift_id: body.shiftId ?? null,
         ingredient_id: body.ingredientId,
@@ -121,7 +122,7 @@ export async function POST(request: NextRequest) {
       if (!res.ok) return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
 
       const inventory =
-        session.role === "OWNER" ? res.inventory : getScopedInventoryServer(session.branchId)
+        session.role === "OWNER" ? res.inventory : await getScopedInventoryServer(session.branchId)
       return NextResponse.json({ ok: true, movement: res.movement, inventory }, { status: 200 })
     }
 
@@ -132,7 +133,10 @@ export async function POST(request: NextRequest) {
           { status: 403 }
         )
       }
-      const branches = listBranchesServer()
+      const [branches, ops] = await Promise.all([
+        listBranchesServer(),
+        getOperationsSnapshotServer(null),
+      ])
       const fromBranch = branches.find((b) => b.id === body.fromBranchId)
       const toBranch = branches.find((b) => b.id === body.toBranchId)
       if (!fromBranch || !toBranch || !body.ingredientId) {
@@ -141,7 +145,10 @@ export async function POST(request: NextRequest) {
           { status: 400 }
         )
       }
-      const res = transferBranchStockServer({
+      const fromShift = ops.shifts.find((s) => s.branch_id === fromBranch.id && s.status === "OPEN")
+      const toShift = ops.shifts.find((s) => s.branch_id === toBranch.id && s.status === "OPEN")
+
+      const res = await transferBranchStockServer({
         from_branch_id: fromBranch.id,
         from_branch_name: fromBranch.name,
         to_branch_id: toBranch.id,
@@ -150,6 +157,8 @@ export async function POST(request: NextRequest) {
         qty: Number(body.qty),
         notes: body.notes ?? "",
         user_id: session.userId,
+        from_shift_id: fromShift?.id ?? null,
+        to_shift_id: toShift?.id ?? null,
       })
       if (!res.ok) return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
 
@@ -200,14 +209,14 @@ export async function PATCH(request: NextRequest) {
     const targetBranchId =
       session.role === "MANAGER" ? session.branchId : body.input.branch_id ?? null
 
-    const res = updateIngredientServer(body.ingredientId, {
+    const res = await updateIngredientServer(body.ingredientId, {
       ...body.input,
       branch_id: targetBranchId,
     })
     if (!res.ok) return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
 
     const inventory =
-      session.role === "OWNER" ? res.inventory : getScopedInventoryServer(session.branchId)
+      session.role === "OWNER" ? res.inventory : await getScopedInventoryServer(session.branchId)
     return NextResponse.json(
       { ok: true, ingredient: res.ingredient, inventory },
       { status: 200 }
@@ -234,10 +243,10 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ ok: false, error: "ID bahan baku wajib diisi." }, { status: 400 })
   }
 
-  const res = deleteIngredientServer(ingredientId)
+  const res = await deleteIngredientServer(ingredientId)
   if (!res.ok) return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
 
   const inventory =
-    session.role === "OWNER" ? res.inventory : getScopedInventoryServer(session.branchId)
+    session.role === "OWNER" ? res.inventory : await getScopedInventoryServer(session.branchId)
   return NextResponse.json({ ok: true, inventory }, { status: 200 })
 }

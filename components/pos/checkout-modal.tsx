@@ -34,7 +34,9 @@ export interface CheckoutModalProps {
     paymentMethod: PaymentMethod
     tenderedAmount: number | null
     splitPayments: SplitPaymentPart[] | null
-  }) => { ok: boolean; order?: Order; error?: string }
+  }) =>
+    | Promise<{ ok: boolean; order?: Order; error?: string }>
+    | { ok: boolean; order?: Order; error?: string }
   onNewTransaction: () => void
 }
 
@@ -69,6 +71,7 @@ export function CheckoutModal({
   const [splitParts, setSplitParts] = useState<SplitPaymentPart[]>([])
   const [completedOrder, setCompletedOrder] = useState<Order | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
 
   const buildEqualSplit = (count: number, amountTotal: number): SplitPaymentPart[] => {
     const base = Math.floor(amountTotal / count)
@@ -124,15 +127,18 @@ export function CheckoutModal({
       : splitParts.length >= 2 && splitRemaining === 0 && splitParts.every((p) => p.amount > 0)
 
   const handleConfirm = async () => {
+    if (submitting) return
     setError(null)
+    setSubmitting(true)
     const primaryMethod: PaymentMethod =
       mode === "SPLIT" ? splitParts[0]?.method ?? "CASH" : method
 
-    const result = onSubmitPayment({
+    const result = await onSubmitPayment({
       paymentMethod: primaryMethod,
       tenderedAmount: mode === "FULL" && method === "CASH" ? cashTendered : null,
       splitPayments: mode === "SPLIT" ? splitParts : null,
     })
+    setSubmitting(false)
 
     if (!result.ok || !result.order) {
       setError(result.error || "Gagal memproses pembayaran.")
@@ -479,10 +485,10 @@ export function CheckoutModal({
           variant="default"
           size="touch"
           className="w-full"
-          disabled={!canConfirm}
+          disabled={!canConfirm || submitting}
           onClick={handleConfirm}
         >
-          Konfirmasi Pembayaran · {formatIDR(total)}
+          {submitting ? "Memproses..." : `Konfirmasi Pembayaran · ${formatIDR(total)}`}
           <ArrowRight className="h-4 w-4" strokeWidth={1.5} />
         </Button>
 

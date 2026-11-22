@@ -1,15 +1,21 @@
 import type { InventorySnapshot, IngredientUpsertServerInput } from "./inventory-server"
 import type { MenuCatalogSnapshot, ProductUpsertServerInput } from "./menu-server"
-import type { BranchUpsertInput, CreateStaffInput } from "./store"
+import type { OperationsSnapshot } from "./operations-server"
+import type { BlindCloseSummary, BranchUpsertInput, CheckoutInput, CreateStaffInput } from "./store"
 import type {
   Branch,
   BranchProduct,
+  CartDraftItem,
   Category,
   Ingredient,
+  Order,
+  OrderStatus,
+  OrderType,
   Product,
   PublicBranchInfo,
   Role,
   SessionUser,
+  Shift,
   StockMovement,
   StockTransfer,
   User,
@@ -689,5 +695,193 @@ export async function transferBranchStockRequest(payload: {
     return { ok: true, transfer: data.transfer, inventory: data.inventory }
   } catch {
     return { ok: false, error: "Gagal menghubungi server saat transfer stok." }
+  }
+}
+
+// ============================================================================
+// Server-Synced Shifts & Orders API (/api/shifts & /api/orders)
+// ============================================================================
+
+export async function fetchServerOperations(): Promise<OperationsSnapshot | null> {
+  try {
+    const res = await fetch("/api/orders", {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+    })
+    if (!res.ok) return null
+    const data = (await res.json()) as { orders?: Order[]; shifts?: Shift[] }
+    if (!Array.isArray(data.orders) || !Array.isArray(data.shifts)) return null
+    return { orders: data.orders, shifts: data.shifts }
+  } catch {
+    return null
+  }
+}
+
+export async function openShiftRequest(payload: {
+  branchId: string
+  openingCash: number
+  notes?: string
+}): Promise<{ ok: boolean; shift?: Shift; shifts?: Shift[]; error?: string }> {
+  try {
+    const res = await fetch("/api/shifts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    })
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean
+      shift?: Shift
+      shifts?: Shift[]
+      error?: string
+    }
+    if (!res.ok || !data.ok || !data.shift) {
+      return { ok: false, error: data.error || "Gagal membuka shift." }
+    }
+    return { ok: true, shift: data.shift, shifts: data.shifts }
+  } catch {
+    return { ok: false, error: "Gagal menghubungi server saat membuka shift." }
+  }
+}
+
+export async function closeShiftBlindRequest(payload: {
+  shiftId: string
+  actualCash: number
+  notes?: string
+}): Promise<{ ok: boolean; summary?: BlindCloseSummary; shifts?: Shift[]; error?: string }> {
+  try {
+    const res = await fetch("/api/shifts", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    })
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean
+      summary?: BlindCloseSummary
+      shifts?: Shift[]
+      error?: string
+    }
+    if (!res.ok || !data.ok || !data.summary) {
+      return { ok: false, error: data.error || "Gagal menutup shift." }
+    }
+    return { ok: true, summary: data.summary, shifts: data.shifts }
+  } catch {
+    return { ok: false, error: "Gagal menghubungi server saat menutup shift." }
+  }
+}
+
+export async function checkoutOrderRequest(
+  payload: Omit<CheckoutInput, "cashier_id" | "is_offline">
+): Promise<{ ok: boolean; order?: Order; orders?: Order[]; shifts?: Shift[]; error?: string }> {
+  try {
+    const res = await fetch("/api/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ action: "checkout", ...payload }),
+    })
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean
+      order?: Order
+      orders?: Order[]
+      shifts?: Shift[]
+      error?: string
+    }
+    if (!res.ok || !data.ok || !data.order) {
+      return { ok: false, error: data.error || "Gagal memproses pembayaran." }
+    }
+    return { ok: true, order: data.order, orders: data.orders, shifts: data.shifts }
+  } catch {
+    return { ok: false, error: "Gagal menghubungi server saat memproses pembayaran." }
+  }
+}
+
+export async function holdOrderRequest(payload: {
+  branch_id: string
+  customer_name: string
+  order_type: OrderType
+  table_number: string | null
+  discount: number
+  discount_reason: string | null
+  items: CartDraftItem[]
+  existing_hold_id?: string | null
+}): Promise<{ ok: boolean; order?: Order; orders?: Order[]; shifts?: Shift[]; error?: string }> {
+  try {
+    const res = await fetch("/api/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ action: "hold", ...payload }),
+    })
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean
+      order?: Order
+      orders?: Order[]
+      shifts?: Shift[]
+      error?: string
+    }
+    if (!res.ok || !data.ok || !data.order) {
+      return { ok: false, error: data.error || "Gagal menahan Open Bill." }
+    }
+    return { ok: true, order: data.order, orders: data.orders, shifts: data.shifts }
+  } catch {
+    return { ok: false, error: "Gagal menghubungi server saat menahan Open Bill." }
+  }
+}
+
+export async function advanceOrderStatusRequest(payload: {
+  orderId: string
+  nextStatus: OrderStatus
+}): Promise<{ ok: boolean; order?: Order; orders?: Order[]; error?: string }> {
+  try {
+    const res = await fetch("/api/orders", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ action: "advance_status", ...payload }),
+    })
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean
+      order?: Order
+      orders?: Order[]
+      error?: string
+    }
+    if (!res.ok || !data.ok || !data.order) {
+      return { ok: false, error: data.error || "Gagal memperbarui status pesanan." }
+    }
+    return { ok: true, order: data.order, orders: data.orders }
+  } catch {
+    return { ok: false, error: "Gagal menghubungi server saat memperbarui status pesanan." }
+  }
+}
+
+export async function voidOrderRequest(payload: {
+  orderId: string
+  reason: string
+  supervisorPin: string
+  branchId?: string | null
+}): Promise<{ ok: boolean; order?: Order; orders?: Order[]; shifts?: Shift[]; error?: string }> {
+  try {
+    const res = await fetch("/api/orders", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ action: "void", ...payload }),
+    })
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean
+      order?: Order
+      orders?: Order[]
+      shifts?: Shift[]
+      error?: string
+    }
+    if (!res.ok || !data.ok || !data.order) {
+      return { ok: false, error: data.error || "Gagal membatalkan pesanan." }
+    }
+    return { ok: true, order: data.order, orders: data.orders, shifts: data.shifts }
+  } catch {
+    return { ok: false, error: "Gagal menghubungi server saat membatalkan pesanan." }
   }
 }

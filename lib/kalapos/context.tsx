@@ -4,8 +4,11 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import {
   ACTIVE_BRANCH_STORAGE_KEY,
   adjustBranchStockRequest,
+  advanceOrderStatusRequest,
   archiveBranchRequest,
+  checkoutOrderRequest,
   clearServerSession,
+  closeShiftBlindRequest,
   createBranchRequest,
   createCategoryRequest,
   createIngredientRequest,
@@ -19,10 +22,13 @@ import {
   fetchServerBranches,
   fetchServerInventory,
   fetchServerMenuCatalog,
+  fetchServerOperations,
   fetchServerSession,
   fetchServerStaff,
+  holdOrderRequest,
   loginWithEmailRequest,
   loginWithPinRequest,
+  openShiftRequest,
   restoreBranchRequest,
   toggleStaffActiveRequest,
   transferBranchStockRequest,
@@ -31,6 +37,7 @@ import {
   updateIngredientRequest,
   updateProductRequest,
   verifySupervisorPinRequest,
+  voidOrderRequest,
 } from "./auth"
 import type { IngredientUpsertServerInput } from "./inventory-server"
 import type { ProductUpsertServerInput } from "./menu-server"
@@ -113,17 +120,21 @@ export interface KalaPOSContextValue {
   // Network / Offline Sync
   toggleSimulatedOffline: () => void
   flushOfflineQueue: () => number
-  // Shift
-  openShift: (openingCash: number, notes?: string, branchId?: string) => StoreResult<Shift>
+  // Shift (Server-Synced)
+  openShift: (
+    openingCash: number,
+    notes?: string,
+    branchId?: string
+  ) => Promise<StoreResult<Shift>>
   closeShiftBlind: (
     shiftId: string,
     actualCash: number,
     notes?: string
-  ) => StoreResult<BlindCloseSummary>
-  // POS & KDS
+  ) => Promise<StoreResult<BlindCloseSummary>>
+  // POS & KDS (Server-Synced with Offline Fallback)
   checkoutOrder: (
     input: Omit<CheckoutInput, "branch_id" | "cashier_id" | "is_offline"> & { branch_id?: string }
-  ) => StoreResult<Order>
+  ) => Promise<StoreResult<Order>>
   holdOrder: (input: {
     customer_name: string
     order_type: OrderType
@@ -132,8 +143,8 @@ export interface KalaPOSContextValue {
     discount_reason: string | null
     items: CartDraftItem[]
     existing_hold_id?: string | null
-  }) => StoreResult<Order>
-  advanceOrderStatus: (orderId: string, nextStatus: OrderStatus) => StoreResult<Order>
+  }) => Promise<StoreResult<Order>>
+  advanceOrderStatus: (orderId: string, nextStatus: OrderStatus) => Promise<StoreResult<Order>>
   voidOrder: (orderId: string, reason: string, supervisorPin: string) => Promise<StoreResult<Order>>
   // Menu CRUD (Owner & Branch Manager Only, Server-Synced)
   createCategory: (name: string) => Promise<StoreResult<Category>>
@@ -232,11 +243,12 @@ export function KalaPOSProvider({ children }: { children: React.ReactNode }) {
   const syncServerDirectory = useCallback(
     async (baseState: KalaPOSState, currentSession: SessionUser | null): Promise<KalaPOSState> => {
       if (!currentSession) return baseState
-      const [serverBranches, serverStaff, serverMenu, serverInv] = await Promise.all([
+      const [serverBranches, serverStaff, serverMenu, serverInv, serverOps] = await Promise.all([
         fetchServerBranches(),
         fetchServerStaff(),
         fetchServerMenuCatalog(),
         fetchServerInventory(),
+        fetchServerOperations(),
       ])
       let merged = baseState
       let changed = false
@@ -268,6 +280,14 @@ export function KalaPOSProvider({ children }: { children: React.ReactNode }) {
           branch_stocks: serverInv.branch_stocks,
           stock_movements: serverInv.stock_movements,
           stock_transfers: serverInv.stock_transfers,
+        }
+        changed = true
+      }
+      if (serverOps !== null) {
+        merged = {
+          ...merged,
+          shifts: serverOps.shifts,
+          orders: serverOps.orders,
         }
         changed = true
       }
@@ -512,47 +532,91 @@ export function KalaPOSProvider({ children }: { children: React.ReactNode }) {
   }, [commitState])
 
   const openShift = useCallback(
-    (openingCash: number, notes?: string, branchId?: string): StoreResult<Shift> => {
+    async (openingCash: number, notes?: string, branchId?: string): Promise<StoreResult<Shift>> => {
       if (!session) return { ok: false, error: "Sesi autentikasi tidak ditemukan." }
       const targetBranch = branchId || activeBranch?.id || activeBranchId
       if (!targetBranch) return { ok: false, error: "Belum ada cabang aktif untuk membuka shift." }
-      const result = executeOpenShift(stateRef.current, targetBranch, session.userId, openingCash, notes)
-      if (result.ok && result.nextState) commitState(result.nextState)
-      return result
+
+      if (!isOnline) {
+        const localRes = executeOpenShift(
+          stateRef.current,
+          targetBranch,
+          session.userId,
+          openingCash,
+          notes
+        )
+        if (localRes.ok && localRes.nextState) commitState(localRes.nextState)
+        return localRes
+      }
+
+      const res = await openShiftRequest({ branchId: targetBranch, openingCash, notes })
+      if (!res.ok || !res.shift) return { ok: false, error: res.error }
+      if (res.shifts) {
+        commitState({ ...stateRef.current, shifts: res.shifts })
+      }
+      return { ok: true, data: res.shift }
     },
-    [activeBranch?.id, activeBranchId, session, commitState]
+    [activeBranch?.id, activeBranchId, session, isOnline, commitState]
   )
 
   const closeShiftBlind = useCallback(
-    (shiftId: string, actualCash: number, notes?: string) => {
-      const result = executeCloseShiftBlind(stateRef.current, shiftId, actualCash, notes)
-      if (result.ok && result.nextState) commitState(result.nextState)
-      return result
+    async (
+      shiftId: string,
+      actualCash: number,
+      notes?: string
+    ): Promise<StoreResult<BlindCloseSummary>> => {
+      if (!isOnline) {
+        const localRes = executeCloseShiftBlind(stateRef.current, shiftId, actualCash, notes)
+        if (localRes.ok && localRes.nextState) commitState(localRes.nextState)
+        return localRes
+      }
+
+      const res = await closeShiftBlindRequest({ shiftId, actualCash, notes })
+      if (!res.ok || !res.summary) return { ok: false, error: res.error }
+      if (res.shifts) {
+        commitState({ ...stateRef.current, shifts: res.shifts })
+      }
+      return { ok: true, data: res.summary }
     },
-    [commitState]
+    [isOnline, commitState]
   )
 
   const checkoutOrder = useCallback(
-    (
+    async (
       input: Omit<CheckoutInput, "branch_id" | "cashier_id" | "is_offline"> & { branch_id?: string }
-    ): StoreResult<Order> => {
+    ): Promise<StoreResult<Order>> => {
       if (!session) return { ok: false, error: "Sesi autentikasi tidak ditemukan." }
       const targetBranch = input.branch_id || activeBranch?.id || activeBranchId
       if (!targetBranch) return { ok: false, error: "Belum ada cabang aktif." }
-      const result = executeAtomicCheckout(stateRef.current, {
+
+      if (!isOnline) {
+        const localRes = executeAtomicCheckout(stateRef.current, {
+          ...input,
+          branch_id: targetBranch,
+          cashier_id: session.userId,
+          is_offline: true,
+        })
+        if (localRes.ok && localRes.nextState) commitState(localRes.nextState)
+        return localRes
+      }
+
+      const res = await checkoutOrderRequest({
         ...input,
         branch_id: targetBranch,
-        cashier_id: session.userId,
-        is_offline: !isOnline,
       })
-      if (result.ok && result.nextState) commitState(result.nextState)
-      return result
+      if (!res.ok || !res.order) return { ok: false, error: res.error }
+      commitState({
+        ...stateRef.current,
+        orders: res.orders ?? [res.order, ...stateRef.current.orders],
+        shifts: res.shifts ?? stateRef.current.shifts,
+      })
+      return { ok: true, data: res.order }
     },
     [activeBranch?.id, activeBranchId, session, isOnline, commitState]
   )
 
   const holdOrder = useCallback(
-    (input: {
+    async (input: {
       customer_name: string
       order_type: OrderType
       table_number: string | null
@@ -560,44 +624,82 @@ export function KalaPOSProvider({ children }: { children: React.ReactNode }) {
       discount_reason: string | null
       items: CartDraftItem[]
       existing_hold_id?: string | null
-    }): StoreResult<Order> => {
+    }): Promise<StoreResult<Order>> => {
       if (!session) return { ok: false, error: "Sesi autentikasi tidak ditemukan." }
       const targetBranch = activeBranch?.id || activeBranchId
       if (!targetBranch) return { ok: false, error: "Belum ada cabang aktif." }
-      const result = executeHoldOrder(stateRef.current, {
+
+      if (!isOnline) {
+        const localRes = executeHoldOrder(stateRef.current, {
+          ...input,
+          branch_id: targetBranch,
+          cashier_id: session.userId,
+        })
+        if (localRes.ok && localRes.nextState) commitState(localRes.nextState)
+        return localRes
+      }
+
+      const res = await holdOrderRequest({
         ...input,
         branch_id: targetBranch,
-        cashier_id: session.userId,
       })
-      if (result.ok && result.nextState) commitState(result.nextState)
-      return result
+      if (!res.ok || !res.order) return { ok: false, error: res.error }
+      commitState({
+        ...stateRef.current,
+        orders: res.orders ?? stateRef.current.orders,
+        shifts: res.shifts ?? stateRef.current.shifts,
+      })
+      return { ok: true, data: res.order }
     },
-    [activeBranch?.id, activeBranchId, session, commitState]
+    [activeBranch?.id, activeBranchId, session, isOnline, commitState]
   )
 
   const advanceOrderStatus = useCallback(
-    (orderId: string, nextStatus: OrderStatus) => {
-      const result = executeAdvanceOrderStatus(stateRef.current, orderId, nextStatus)
-      if (result.ok && result.nextState) commitState(result.nextState)
-      return result
+    async (orderId: string, nextStatus: OrderStatus): Promise<StoreResult<Order>> => {
+      if (!isOnline) {
+        const localRes = executeAdvanceOrderStatus(stateRef.current, orderId, nextStatus)
+        if (localRes.ok && localRes.nextState) commitState(localRes.nextState)
+        return localRes
+      }
+
+      const res = await advanceOrderStatusRequest({ orderId, nextStatus })
+      if (!res.ok || !res.order) return { ok: false, error: res.error }
+      if (res.orders) {
+        commitState({ ...stateRef.current, orders: res.orders })
+      }
+      return { ok: true, data: res.order }
     },
-    [commitState]
+    [isOnline, commitState]
   )
 
   const voidOrder = useCallback(
     async (orderId: string, reason: string, supervisorPin: string): Promise<StoreResult<Order>> => {
-      const auth = await verifySupervisorPinRequest(
-        supervisorPin,
-        activeBranch?.id ?? session?.branchId ?? null
-      )
-      if (!auth.ok || !auth.supervisorId) {
-        return { ok: false, error: auth.error || "PIN Supervisor tidak valid." }
+      const targetBranch = activeBranch?.id ?? session?.branchId ?? null
+      if (!isOnline) {
+        const auth = await verifySupervisorPinRequest(supervisorPin, targetBranch)
+        if (!auth.ok || !auth.supervisorId) {
+          return { ok: false, error: auth.error || "PIN Supervisor tidak valid." }
+        }
+        const localRes = executeVoidOrder(stateRef.current, orderId, reason, auth.supervisorId)
+        if (localRes.ok && localRes.nextState) commitState(localRes.nextState)
+        return localRes
       }
-      const result = executeVoidOrder(stateRef.current, orderId, reason, auth.supervisorId)
-      if (result.ok && result.nextState) commitState(result.nextState)
-      return result
+
+      const res = await voidOrderRequest({
+        orderId,
+        reason,
+        supervisorPin,
+        branchId: targetBranch,
+      })
+      if (!res.ok || !res.order) return { ok: false, error: res.error }
+      commitState({
+        ...stateRef.current,
+        orders: res.orders ?? stateRef.current.orders,
+        shifts: res.shifts ?? stateRef.current.shifts,
+      })
+      return { ok: true, data: res.order }
     },
-    [activeBranch?.id, session?.branchId, commitState]
+    [activeBranch?.id, session?.branchId, isOnline, commitState]
   )
 
   // ============================================================================

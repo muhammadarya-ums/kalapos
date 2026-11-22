@@ -17,7 +17,7 @@ export async function GET() {
     return NextResponse.json({ ok: false, error: "Autentikasi diperlukan." }, { status: 401 })
   }
 
-  const all = listBranchesServer()
+  const all = await listBranchesServer()
   if (session.role === "OWNER") {
     return NextResponse.json({ ok: true, branches: all }, { status: 200 })
   }
@@ -42,7 +42,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = (await request.json()) as BranchUpsertInput
-    const res = createBranchServer(body)
+    const res = await createBranchServer(body)
     if (!res.ok) {
       return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
     }
@@ -78,13 +78,13 @@ export async function PATCH(request: NextRequest) {
     }
 
     if (body.action === "archive") {
-      const res = archiveBranchServer(body.branchId)
+      const res = await archiveBranchServer(body.branchId)
       if (!res.ok) return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
       return NextResponse.json({ ok: true, branch: res.branch, branches: res.branches }, { status: 200 })
     }
 
     if (body.action === "restore") {
-      const res = restoreBranchServer(body.branchId)
+      const res = await restoreBranchServer(body.branchId)
       if (!res.ok) return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
       return NextResponse.json({ ok: true, branch: res.branch, branches: res.branches }, { status: 200 })
     }
@@ -92,7 +92,7 @@ export async function PATCH(request: NextRequest) {
     if (!body.input) {
       return NextResponse.json({ ok: false, error: "Data pembaruan cabang wajib diisi." }, { status: 400 })
     }
-    const res = updateBranchServer(body.branchId, body.input)
+    const res = await updateBranchServer(body.branchId, body.input)
     if (!res.ok) return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
     return NextResponse.json({ ok: true, branch: res.branch, branches: res.branches }, { status: 200 })
   } catch {
@@ -117,7 +117,7 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ ok: false, error: "ID cabang wajib diisi." }, { status: 400 })
   }
 
-  const res = deleteBranchServer(branchId)
+  const res = await deleteBranchServer(branchId)
   if (!res.ok) {
     return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
   }

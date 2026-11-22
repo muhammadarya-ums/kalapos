@@ -5,6 +5,7 @@ import { generateId } from "./format"
 import { initBranchStocksForNewBranchServer, removeBranchStocksServer } from "./inventory-server"
 import { removeBranchFromMenuServer } from "./menu-server"
 import type { BranchUpsertInput } from "./store"
+import { getSupabaseAdmin } from "./supabase-server"
 import type { Branch, BranchStatus, PublicBranchInfo } from "./types"
 
 const DATA_DIR = path.join(process.cwd(), ".kala-data")
@@ -51,12 +52,27 @@ function writeBranchesToDisk(branches: Branch[]): void {
   }
 }
 
-export function listBranchesServer(): Branch[] {
+export async function listBranchesServer(): Promise<Branch[]> {
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { data, error } = await supabase
+      .from("branches")
+      .select("*")
+      .order("created_at", { ascending: true })
+
+    if (!error && data) {
+      return data.map((b) => ({
+        ...b,
+        status: b.status as BranchStatus,
+      }))
+    }
+  }
   return readBranchesFromDisk()
 }
 
-export function listPublicActiveBranchesServer(): PublicBranchInfo[] {
-  return readBranchesFromDisk()
+export async function listPublicActiveBranchesServer(): Promise<PublicBranchInfo[]> {
+  const branches = await listBranchesServer()
+  return branches
     .filter((b) => !b.deleted_at && b.status !== "INACTIVE")
     .map((b) => ({
       id: b.id,
@@ -66,18 +82,31 @@ export function listPublicActiveBranchesServer(): PublicBranchInfo[] {
     }))
 }
 
-export function findActiveBranchServer(branchId: string): Branch | null {
+export async function findActiveBranchServer(branchId: string): Promise<Branch | null> {
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { data, error } = await supabase
+      .from("branches")
+      .select("*")
+      .eq("id", branchId)
+      .is("deleted_at", null)
+      .neq("status", "INACTIVE")
+      .maybeSingle()
+
+    if (!error) {
+      return data ? { ...data, status: data.status as BranchStatus } : null
+    }
+  }
+  const branches = await listBranchesServer()
   return (
-    readBranchesFromDisk().find(
-      (b) => b.id === branchId && !b.deleted_at && b.status !== "INACTIVE"
-    ) ?? null
+    branches.find((b) => b.id === branchId && !b.deleted_at && b.status !== "INACTIVE") ?? null
   )
 }
 
-export function createBranchServer(
+export async function createBranchServer(
   input: BranchUpsertInput
-): { ok: true; branch: Branch; branches: Branch[] } | { ok: false; error: string } {
-  const branches = readBranchesFromDisk()
+): Promise<{ ok: true; branch: Branch; branches: Branch[] } | { ok: false; error: string }> {
+  const branches = await listBranchesServer()
   const name = input.name.trim()
   const code = input.code.trim().toUpperCase()
   if (!name || !code) {
@@ -107,17 +136,27 @@ export function createBranchServer(
     created_at: new Date().toISOString(),
   }
 
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { error } = await supabase.from("branches").insert(newBranch)
+    if (error) {
+      return { ok: false, error: `Gagal menyimpan cabang ke Supabase: ${error.message}` }
+    }
+    await initBranchStocksForNewBranchServer(newBranch.id)
+    return { ok: true, branch: newBranch, branches: await listBranchesServer() }
+  }
+
   const next = [...branches, newBranch]
   writeBranchesToDisk(next)
-  initBranchStocksForNewBranchServer(newBranch.id)
+  await initBranchStocksForNewBranchServer(newBranch.id)
   return { ok: true, branch: newBranch, branches: next }
 }
 
-export function updateBranchServer(
+export async function updateBranchServer(
   branchId: string,
   input: BranchUpsertInput
-): { ok: true; branch: Branch; branches: Branch[] } | { ok: false; error: string } {
-  const branches = readBranchesFromDisk()
+): Promise<{ ok: true; branch: Branch; branches: Branch[] } | { ok: false; error: string }> {
+  const branches = await listBranchesServer()
   const existing = branches.find((b) => b.id === branchId)
   if (!existing) return { ok: false, error: "Cabang tidak ditemukan." }
 
@@ -145,15 +184,38 @@ export function updateBranchServer(
     deleted_at: validStatus === "INACTIVE" ? existing.deleted_at : null,
   }
 
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { error } = await supabase
+      .from("branches")
+      .update({
+        name: updated.name,
+        code: updated.code,
+        address: updated.address,
+        phone: updated.phone,
+        tax_rate: updated.tax_rate,
+        service_charge_rate: updated.service_charge_rate,
+        receipt_footer: updated.receipt_footer,
+        status: updated.status,
+        deleted_at: updated.deleted_at,
+      })
+      .eq("id", branchId)
+
+    if (error) {
+      return { ok: false, error: `Gagal memperbarui cabang di Supabase: ${error.message}` }
+    }
+    return { ok: true, branch: updated, branches: await listBranchesServer() }
+  }
+
   const next = branches.map((b) => (b.id === branchId ? updated : b))
   writeBranchesToDisk(next)
   return { ok: true, branch: updated, branches: next }
 }
 
-export function archiveBranchServer(
+export async function archiveBranchServer(
   branchId: string
-): { ok: true; branch: Branch; branches: Branch[] } | { ok: false; error: string } {
-  const branches = readBranchesFromDisk()
+): Promise<{ ok: true; branch: Branch; branches: Branch[] } | { ok: false; error: string }> {
+  const branches = await listBranchesServer()
   const existing = branches.find((b) => b.id === branchId)
   if (!existing) return { ok: false, error: "Cabang tidak ditemukan." }
 
@@ -163,15 +225,28 @@ export function archiveBranchServer(
     deleted_at: new Date().toISOString(),
   }
 
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { error } = await supabase
+      .from("branches")
+      .update({ status: "INACTIVE", deleted_at: archived.deleted_at })
+      .eq("id", branchId)
+
+    if (error) {
+      return { ok: false, error: `Gagal mengarsipkan cabang di Supabase: ${error.message}` }
+    }
+    return { ok: true, branch: archived, branches: await listBranchesServer() }
+  }
+
   const next = branches.map((b) => (b.id === branchId ? archived : b))
   writeBranchesToDisk(next)
   return { ok: true, branch: archived, branches: next }
 }
 
-export function restoreBranchServer(
+export async function restoreBranchServer(
   branchId: string
-): { ok: true; branch: Branch; branches: Branch[] } | { ok: false; error: string } {
-  const branches = readBranchesFromDisk()
+): Promise<{ ok: true; branch: Branch; branches: Branch[] } | { ok: false; error: string }> {
+  const branches = await listBranchesServer()
   const existing = branches.find((b) => b.id === branchId)
   if (!existing) return { ok: false, error: "Cabang tidak ditemukan." }
 
@@ -181,22 +256,47 @@ export function restoreBranchServer(
     deleted_at: null,
   }
 
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { error } = await supabase
+      .from("branches")
+      .update({ status: "ACTIVE", deleted_at: null })
+      .eq("id", branchId)
+
+    if (error) {
+      return { ok: false, error: `Gagal memulihkan cabang di Supabase: ${error.message}` }
+    }
+    return { ok: true, branch: restored, branches: await listBranchesServer() }
+  }
+
   const next = branches.map((b) => (b.id === branchId ? restored : b))
   writeBranchesToDisk(next)
   return { ok: true, branch: restored, branches: next }
 }
 
-export function deleteBranchServer(
+export async function deleteBranchServer(
   branchId: string
-): { ok: true; branches: Branch[] } | { ok: false; error: string } {
-  const branches = readBranchesFromDisk()
+): Promise<{ ok: true; branches: Branch[] } | { ok: false; error: string }> {
+  const branches = await listBranchesServer()
   if (!branches.some((b) => b.id === branchId)) {
     return { ok: false, error: "Cabang tidak ditemukan." }
   }
+
+  // Deactivate & unassign staff BEFORE deleting branch so FK set-null doesn't leave staff active
+  await unassignBranchFromStaffServer(branchId)
+
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { error } = await supabase.from("branches").delete().eq("id", branchId)
+    if (error) {
+      return { ok: false, error: `Gagal menghapus cabang di Supabase: ${error.message}` }
+    }
+    return { ok: true, branches: await listBranchesServer() }
+  }
+
   const next = branches.filter((b) => b.id !== branchId)
   writeBranchesToDisk(next)
-  unassignBranchFromStaffServer(branchId)
-  removeBranchFromMenuServer(branchId)
-  removeBranchStocksServer(branchId)
+  await removeBranchFromMenuServer(branchId)
+  await removeBranchStocksServer(branchId)
   return { ok: true, branches: next }
 }

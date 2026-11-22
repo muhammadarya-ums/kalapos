@@ -171,9 +171,9 @@ export default function PosPage() {
     )
   }, [])
 
-  const handleHoldOrder = useCallback(() => {
+  const handleHoldOrder = useCallback(async () => {
     if (cart.length === 0) return
-    const res = holdOrder({
+    const res = await holdOrder({
       customer_name: customerName,
       order_type: orderType,
       table_number: orderType === "DINE_IN" ? tableNumber || null : null,
@@ -359,8 +359,8 @@ export default function PosPage() {
         cashierName={session?.fullName ?? "Kasir"}
         total={totals.total}
         nextQueuePreview={nextQueuePreview}
-        onSubmitPayment={({ paymentMethod, tenderedAmount, splitPayments }) => {
-          const res = checkoutOrder({
+        onSubmitPayment={async ({ paymentMethod, tenderedAmount, splitPayments }) => {
+          const res = await checkoutOrder({
             customer_name: customerName,
             order_type: orderType,
             table_number: orderType === "DINE_IN" ? tableNumber || null : null,
@@ -400,9 +400,9 @@ export default function PosPage() {
         maxWidthClassName="max-w-sm"
       >
         <form
-          onSubmit={(e) => {
+          onSubmit={async (e) => {
             e.preventDefault()
-            const res = openShift(quickOpeningCash, "Pembukaan shift dari terminal kasir")
+            const res = await openShift(quickOpeningCash, "Pembukaan shift dari terminal kasir")
             if (!res.ok) {
               toast(res.error || "Gagal membuka shift.", "error")
               return

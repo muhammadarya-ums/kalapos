@@ -26,8 +26,8 @@ export async function GET() {
 
   const catalog =
     session.role === "OWNER"
-      ? getMenuCatalogServer()
-      : getScopedMenuCatalogServer(session.branchId)
+      ? await getMenuCatalogServer()
+      : await getScopedMenuCatalogServer(session.branchId)
 
   return NextResponse.json({ ok: true, catalog }, { status: 200 })
 }
@@ -52,10 +52,10 @@ export async function POST(request: NextRequest) {
     }
 
     if (body.entity === "category") {
-      const res = createCategoryServer(body.name ?? "")
+      const res = await createCategoryServer(body.name ?? "")
       if (!res.ok) return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
       const catalog =
-        session.role === "OWNER" ? res.catalog : getScopedMenuCatalogServer(session.branchId)
+        session.role === "OWNER" ? res.catalog : await getScopedMenuCatalogServer(session.branchId)
       return NextResponse.json({ ok: true, category: res.category, catalog }, { status: 201 })
     }
 
@@ -71,7 +71,7 @@ export async function POST(request: NextRequest) {
         targetBranchId = session.branchId
       } else {
         targetBranchId = body.input.branch_id ? body.input.branch_id.trim() : null
-        if (targetBranchId && !findActiveBranchServer(targetBranchId)) {
+        if (targetBranchId && !(await findActiveBranchServer(targetBranchId))) {
           return NextResponse.json(
             { ok: false, error: "Cabang tujuan menu tidak ditemukan atau nonaktif." },
             { status: 400 }
@@ -79,14 +79,14 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      const res = createProductServer({
+      const res = await createProductServer({
         ...body.input,
         branch_id: targetBranchId,
       })
       if (!res.ok) return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
 
       const catalog =
-        session.role === "OWNER" ? res.catalog : getScopedMenuCatalogServer(session.branchId)
+        session.role === "OWNER" ? res.catalog : await getScopedMenuCatalogServer(session.branchId)
       return NextResponse.json({ ok: true, product: res.product, catalog }, { status: 201 })
     }
 
@@ -129,7 +129,7 @@ export async function PATCH(request: NextRequest) {
         )
       }
 
-      const res = upsertBranchProductOverrideServer({
+      const res = await upsertBranchProductOverrideServer({
         branch_id: targetBranchId,
         product_id: body.productId,
         is_available: body.isAvailable !== false,
@@ -138,7 +138,7 @@ export async function PATCH(request: NextRequest) {
       if (!res.ok) return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
 
       const catalog =
-        session.role === "OWNER" ? res.catalog : getScopedMenuCatalogServer(session.branchId)
+        session.role === "OWNER" ? res.catalog : await getScopedMenuCatalogServer(session.branchId)
       return NextResponse.json(
         { ok: true, branchProduct: res.branchProduct, catalog },
         { status: 200 }
@@ -146,14 +146,14 @@ export async function PATCH(request: NextRequest) {
     }
 
     if (body.entity === "product" && body.productId && body.input) {
-      const res = updateProductServer(body.productId, body.input, {
+      const res = await updateProductServer(body.productId, body.input, {
         role: session.role,
         branchId: session.branchId,
       })
       if (!res.ok) return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
 
       const catalog =
-        session.role === "OWNER" ? res.catalog : getScopedMenuCatalogServer(session.branchId)
+        session.role === "OWNER" ? res.catalog : await getScopedMenuCatalogServer(session.branchId)
       return NextResponse.json({ ok: true, product: res.product, catalog }, { status: 200 })
     }
 
@@ -182,18 +182,18 @@ export async function DELETE(request: NextRequest) {
   }
 
   if (entity === "category") {
-    const res = deleteCategoryServer(id)
+    const res = await deleteCategoryServer(id)
     if (!res.ok) return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
     const catalog =
-      session.role === "OWNER" ? res.catalog : getScopedMenuCatalogServer(session.branchId)
+      session.role === "OWNER" ? res.catalog : await getScopedMenuCatalogServer(session.branchId)
     return NextResponse.json({ ok: true, catalog }, { status: 200 })
   }
 
   if (entity === "product") {
-    const res = deleteProductServer(id, { role: session.role, branchId: session.branchId })
+    const res = await deleteProductServer(id, { role: session.role, branchId: session.branchId })
     if (!res.ok) return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
     const catalog =
-      session.role === "OWNER" ? res.catalog : getScopedMenuCatalogServer(session.branchId)
+      session.role === "OWNER" ? res.catalog : await getScopedMenuCatalogServer(session.branchId)
     return NextResponse.json({ ok: true, catalog }, { status: 200 })
   }
 

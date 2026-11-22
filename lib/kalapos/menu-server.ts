@@ -1,6 +1,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { generateId } from "./format"
+import { getSupabaseAdmin } from "./supabase-server"
 import type {
   BranchProduct,
   Category,
@@ -109,12 +110,85 @@ function writeMenuToDisk(catalog: MenuCatalogSnapshot): void {
   }
 }
 
-export function getMenuCatalogServer(): MenuCatalogSnapshot {
+export async function getMenuCatalogServer(): Promise<MenuCatalogSnapshot> {
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const [
+      catRes,
+      prodRes,
+      bpRes,
+      mgRes,
+      moRes,
+      pmgRes,
+      recRes,
+    ] = await Promise.all([
+      supabase.from("categories").select("*").order("sort_order", { ascending: true }),
+      supabase.from("products").select("*").order("created_at", { ascending: true }),
+      supabase.from("branch_products").select("*"),
+      supabase.from("modifier_groups").select("*"),
+      supabase.from("modifier_options").select("*"),
+      supabase.from("product_modifier_groups").select("*").order("sort_order", { ascending: true }),
+      supabase.from("product_recipes").select("*"),
+    ])
+
+    if (!catRes.error && !prodRes.error && !bpRes.error) {
+      return {
+        categories: (catRes.data ?? []).map((c) => ({
+          id: c.id,
+          name: c.name,
+          sort_order: Number(c.sort_order),
+        })),
+        products: (prodRes.data ?? []).map((p) => ({
+          id: p.id,
+          category_id: p.category_id,
+          branch_id: p.branch_id,
+          name: p.name,
+          base_price: Number(p.base_price),
+          sku: p.sku,
+          mark: p.mark,
+          tone: p.tone as ProductTone,
+          is_customizable: p.is_customizable,
+          is_active: p.is_active,
+        })),
+        branch_products: (bpRes.data ?? []).map((bp) => ({
+          branch_id: bp.branch_id,
+          product_id: bp.product_id,
+          is_available: bp.is_available,
+          custom_price: bp.custom_price === null ? null : Number(bp.custom_price),
+        })),
+        modifier_groups:
+          mgRes.data && mgRes.data.length > 0 ? mgRes.data : DEFAULT_MODIFIER_GROUPS,
+        modifier_options:
+          moRes.data && moRes.data.length > 0
+            ? moRes.data.map((mo) => ({
+                id: mo.id,
+                group_id: mo.group_id,
+                name: mo.name,
+                price_delta: Number(mo.price_delta),
+                ingredient_id: mo.ingredient_id,
+                qty_required: Number(mo.qty_required),
+              }))
+            : DEFAULT_MODIFIER_OPTIONS,
+        product_modifier_groups: (pmgRes.data ?? []).map((pmg) => ({
+          product_id: pmg.product_id,
+          group_id: pmg.group_id,
+          sort_order: Number(pmg.sort_order),
+        })),
+        product_recipes: (recRes.data ?? []).map((r) => ({
+          product_id: r.product_id,
+          ingredient_id: r.ingredient_id,
+          qty_required: Number(r.qty_required),
+        })),
+      }
+    }
+  }
   return readMenuFromDisk()
 }
 
-export function getScopedMenuCatalogServer(branchId: string | null): MenuCatalogSnapshot {
-  const full = readMenuFromDisk()
+export async function getScopedMenuCatalogServer(
+  branchId: string | null
+): Promise<MenuCatalogSnapshot> {
+  const full = await getMenuCatalogServer()
   if (!branchId) return full
   const visibleProducts = full.products.filter((p) => !p.branch_id || p.branch_id === branchId)
   const visibleIds = new Set(visibleProducts.map((p) => p.id))
@@ -131,13 +205,13 @@ export function getScopedMenuCatalogServer(branchId: string | null): MenuCatalog
   }
 }
 
-export function createCategoryServer(
+export async function createCategoryServer(
   name: string
-): { ok: true; category: Category; catalog: MenuCatalogSnapshot } | { ok: false; error: string } {
+): Promise<{ ok: true; category: Category; catalog: MenuCatalogSnapshot } | { ok: false; error: string }> {
   const cleanName = name.trim()
   if (!cleanName) return { ok: false, error: "Nama kategori wajib diisi." }
 
-  const catalog = readMenuFromDisk()
+  const catalog = await getMenuCatalogServer()
   if (catalog.categories.some((c) => c.name.toLowerCase() === cleanName.toLowerCase())) {
     return { ok: false, error: `Kategori "${cleanName}" sudah ada.` }
   }
@@ -148,6 +222,14 @@ export function createCategoryServer(
     name: cleanName,
     sort_order: maxSort + 1,
   }
+
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { error } = await supabase.from("categories").insert(category)
+    if (error) return { ok: false, error: `Gagal menambah kategori di Supabase: ${error.message}` }
+    return { ok: true, category, catalog: await getMenuCatalogServer() }
+  }
+
   const next: MenuCatalogSnapshot = {
     ...catalog,
     categories: [...catalog.categories, category],
@@ -156,10 +238,10 @@ export function createCategoryServer(
   return { ok: true, category, catalog: next }
 }
 
-export function deleteCategoryServer(
+export async function deleteCategoryServer(
   categoryId: string
-): { ok: true; catalog: MenuCatalogSnapshot } | { ok: false; error: string } {
-  const catalog = readMenuFromDisk()
+): Promise<{ ok: true; catalog: MenuCatalogSnapshot } | { ok: false; error: string }> {
+  const catalog = await getMenuCatalogServer()
   if (!catalog.categories.some((c) => c.id === categoryId)) {
     return { ok: false, error: "Kategori tidak ditemukan." }
   }
@@ -169,6 +251,14 @@ export function deleteCategoryServer(
       error: "Kategori masih digunakan oleh menu. Pindahkan atau hapus menu di kategori ini terlebih dahulu.",
     }
   }
+
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { error } = await supabase.from("categories").delete().eq("id", categoryId)
+    if (error) return { ok: false, error: `Gagal menghapus kategori di Supabase: ${error.message}` }
+    return { ok: true, catalog: await getMenuCatalogServer() }
+  }
+
   const next: MenuCatalogSnapshot = {
     ...catalog,
     categories: catalog.categories.filter((c) => c.id !== categoryId),
@@ -220,10 +310,10 @@ function normalizeRecipes(productId: string, recipes: ProductRecipeInput[]): Pro
   }))
 }
 
-export function createProductServer(
+export async function createProductServer(
   input: ProductUpsertServerInput
-): { ok: true; product: Product; catalog: MenuCatalogSnapshot } | { ok: false; error: string } {
-  const catalog = readMenuFromDisk()
+): Promise<{ ok: true; product: Product; catalog: MenuCatalogSnapshot } | { ok: false; error: string }> {
+  const catalog = await getMenuCatalogServer()
   const name = input.name.trim()
   const sku = input.sku.trim().toUpperCase()
   const basePrice = Math.round(Number(input.base_price))
@@ -266,6 +356,45 @@ export function createProductServer(
       ]
     : []
 
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { error: prodErr } = await supabase.from("products").insert({
+      id: product.id,
+      category_id: product.category_id,
+      branch_id: product.branch_id ?? null,
+      name: product.name,
+      base_price: product.base_price,
+      sku: product.sku,
+      mark: product.mark,
+      tone: product.tone,
+      is_customizable: product.is_customizable,
+      is_active: product.is_active,
+    })
+    if (prodErr) {
+      return { ok: false, error: `Gagal menyimpan menu ke Supabase: ${prodErr.message}` }
+    }
+
+    if (nextRecipes.length > 0) {
+      await supabase.from("product_recipes").insert(nextRecipes)
+    }
+    if (nextModifierGroups.length > 0) {
+      await supabase.from("product_modifier_groups").insert(nextModifierGroups)
+    }
+    if (product.branch_id) {
+      await supabase.from("branch_products").upsert(
+        {
+          branch_id: product.branch_id,
+          product_id: productId,
+          is_available: true,
+          custom_price: null,
+        },
+        { onConflict: "branch_id,product_id" }
+      )
+    }
+
+    return { ok: true, product, catalog: await getMenuCatalogServer() }
+  }
+
   const nextBranchProducts = product.branch_id
     ? [
         ...catalog.branch_products,
@@ -290,12 +419,12 @@ export function createProductServer(
   return { ok: true, product, catalog: next }
 }
 
-export function updateProductServer(
+export async function updateProductServer(
   productId: string,
   input: ProductUpsertServerInput,
   actor: { role: "OWNER" | "MANAGER"; branchId: string | null }
-): { ok: true; product: Product; catalog: MenuCatalogSnapshot } | { ok: false; error: string } {
-  const catalog = readMenuFromDisk()
+): Promise<{ ok: true; product: Product; catalog: MenuCatalogSnapshot } | { ok: false; error: string }> {
+  const catalog = await getMenuCatalogServer()
   const existing = catalog.products.find((p) => p.id === productId)
   if (!existing) return { ok: false, error: "Menu tidak ditemukan." }
 
@@ -304,7 +433,8 @@ export function updateProductServer(
     if (!existing.branch_id || existing.branch_id !== actor.branchId) {
       return {
         ok: false,
-        error: "Manager cabang hanya dapat mengedit menu lokal cabangnya sendiri. Untuk menu pusat, ubah ketersediaan atau harga cabang.",
+        error:
+          "Manager cabang hanya dapat mengedit menu lokal cabangnya sendiri. Untuk menu pusat, ubah ketersediaan atau harga cabang.",
       }
     }
   }
@@ -358,6 +488,40 @@ export function updateProductServer(
       ]
     : []
 
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { error: updErr } = await supabase
+      .from("products")
+      .update({
+        category_id: updated.category_id,
+        branch_id: updated.branch_id ?? null,
+        name: updated.name,
+        base_price: updated.base_price,
+        sku: updated.sku,
+        mark: updated.mark,
+        tone: updated.tone,
+        is_customizable: updated.is_customizable,
+        is_active: updated.is_active,
+      })
+      .eq("id", productId)
+
+    if (updErr) {
+      return { ok: false, error: `Gagal memperbarui menu di Supabase: ${updErr.message}` }
+    }
+
+    await supabase.from("product_recipes").delete().eq("product_id", productId)
+    if (nextRecipes.length > 0) {
+      await supabase.from("product_recipes").insert(nextRecipes)
+    }
+
+    await supabase.from("product_modifier_groups").delete().eq("product_id", productId)
+    if (nextModifierGroups.length > 0) {
+      await supabase.from("product_modifier_groups").insert(nextModifierGroups)
+    }
+
+    return { ok: true, product: updated, catalog: await getMenuCatalogServer() }
+  }
+
   const next: MenuCatalogSnapshot = {
     ...catalog,
     products: catalog.products.map((p) => (p.id === productId ? updated : p)),
@@ -375,11 +539,11 @@ export function updateProductServer(
   return { ok: true, product: updated, catalog: next }
 }
 
-export function deleteProductServer(
+export async function deleteProductServer(
   productId: string,
   actor: { role: "OWNER" | "MANAGER"; branchId: string | null }
-): { ok: true; catalog: MenuCatalogSnapshot } | { ok: false; error: string } {
-  const catalog = readMenuFromDisk()
+): Promise<{ ok: true; catalog: MenuCatalogSnapshot } | { ok: false; error: string }> {
+  const catalog = await getMenuCatalogServer()
   const existing = catalog.products.find((p) => p.id === productId)
   if (!existing) return { ok: false, error: "Menu tidak ditemukan." }
 
@@ -387,9 +551,17 @@ export function deleteProductServer(
     if (!existing.branch_id || existing.branch_id !== actor.branchId) {
       return {
         ok: false,
-        error: "Manager cabang tidak dapat menghapus menu pusat Kafe Kala. Nonaktifkan saja ketersediaannya untuk cabang ini.",
+        error:
+          "Manager cabang tidak dapat menghapus menu pusat Kafe Kala. Nonaktifkan saja ketersediaannya untuk cabang ini.",
       }
     }
+  }
+
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { error } = await supabase.from("products").delete().eq("id", productId)
+    if (error) return { ok: false, error: `Gagal menghapus menu di Supabase: ${error.message}` }
+    return { ok: true, catalog: await getMenuCatalogServer() }
   }
 
   const next: MenuCatalogSnapshot = {
@@ -406,18 +578,20 @@ export function deleteProductServer(
   return { ok: true, catalog: next }
 }
 
-export function upsertBranchProductOverrideServer(input: {
+export async function upsertBranchProductOverrideServer(input: {
   branch_id: string
   product_id: string
   is_available: boolean
   custom_price: number | null
-}): { ok: true; branchProduct: BranchProduct; catalog: MenuCatalogSnapshot } | { ok: false; error: string } {
-  const catalog = readMenuFromDisk()
+}): Promise<{ ok: true; branchProduct: BranchProduct; catalog: MenuCatalogSnapshot } | { ok: false; error: string }> {
+  const catalog = await getMenuCatalogServer()
   if (!catalog.products.some((p) => p.id === input.product_id)) {
     return { ok: false, error: "Menu tidak ditemukan." }
   }
   const customPrice =
-    input.custom_price === null || input.custom_price === undefined || Number.isNaN(Number(input.custom_price))
+    input.custom_price === null ||
+    input.custom_price === undefined ||
+    Number.isNaN(Number(input.custom_price))
       ? null
       : Math.max(0, Math.round(Number(input.custom_price)))
 
@@ -426,6 +600,18 @@ export function upsertBranchProductOverrideServer(input: {
     product_id: input.product_id,
     is_available: Boolean(input.is_available),
     custom_price: customPrice,
+  }
+
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    const { error } = await supabase
+      .from("branch_products")
+      .upsert(entry, { onConflict: "branch_id,product_id" })
+
+    if (error) {
+      return { ok: false, error: `Gagal menyimpan pengaturan cabang di Supabase: ${error.message}` }
+    }
+    return { ok: true, branchProduct: entry, catalog: await getMenuCatalogServer() }
   }
 
   const exists = catalog.branch_products.some(
@@ -446,7 +632,13 @@ export function upsertBranchProductOverrideServer(input: {
   return { ok: true, branchProduct: entry, catalog: next }
 }
 
-export function removeIngredientFromRecipesServer(ingredientId: string): void {
+export async function removeIngredientFromRecipesServer(ingredientId: string): Promise<void> {
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    await supabase.from("product_recipes").delete().eq("ingredient_id", ingredientId)
+    return
+  }
+
   const catalog = readMenuFromDisk()
   const filtered = catalog.product_recipes.filter((r) => r.ingredient_id !== ingredientId)
   if (filtered.length !== catalog.product_recipes.length) {
@@ -454,7 +646,13 @@ export function removeIngredientFromRecipesServer(ingredientId: string): void {
   }
 }
 
-export function removeBranchFromMenuServer(branchId: string): void {
+export async function removeBranchFromMenuServer(branchId: string): Promise<void> {
+  const supabase = getSupabaseAdmin()
+  if (supabase) {
+    // Handled automatically by Postgres ON DELETE CASCADE when deleting from public.branches
+    return
+  }
+
   const catalog = readMenuFromDisk()
   const removedProductIds = new Set(
     catalog.products.filter((p) => p.branch_id === branchId).map((p) => p.id)

@@ -12,7 +12,6 @@ export interface KalaPOSRepository {
   loadState(): Promise<KalaPOSState>
   saveState(state: KalaPOSState): Promise<void>
   subscribe(onExternalUpdate: (state: KalaPOSState) => void): () => void
-  callCheckoutRpc?(payload: Record<string, unknown>): Promise<{ ok: boolean; error?: string }>
 }
 
 function openIndexedDB(): Promise<IDBDatabase | null> {
@@ -160,22 +159,16 @@ export class LocalPersistenceAdapter implements KalaPOSRepository {
 }
 
 /**
- * Supabase PostgreSQL + Realtime Adapter (ready to activate when env vars are configured).
- * Always mirrors locally into IndexedDB for offline-first resilience.
+ * Supabase-Backed Offline-First Adapter:
+ * Authoritative reads/writes flow through authenticated Next.js Server Routes
+ * connected to Supabase PostgreSQL (service_role), while IndexedDB + BroadcastChannel
+ * maintain instant local hydration and cross-tab sync.
  */
 export class SupabaseAdapter implements KalaPOSRepository {
   readonly mode = "supabase" as const
   private local = new LocalPersistenceAdapter()
-  private supabaseUrl: string
-  private anonKey: string
-
-  constructor(supabaseUrl: string, anonKey: string) {
-    this.supabaseUrl = supabaseUrl.replace(/\/$/, "")
-    this.anonKey = anonKey
-  }
 
   async loadState(): Promise<KalaPOSState> {
-    // Always hydrate instantly from local offline store; remote sync can hydrate asynchronously.
     return this.local.loadState()
   }
 
@@ -186,38 +179,15 @@ export class SupabaseAdapter implements KalaPOSRepository {
   subscribe(onExternalUpdate: (state: KalaPOSState) => void): () => void {
     return this.local.subscribe(onExternalUpdate)
   }
-
-  /** Invoke PostgreSQL atomic RPC `public.process_pos_checkout` via PostgREST */
-  async callCheckoutRpc(payload: Record<string, unknown>): Promise<{ ok: boolean; error?: string }> {
-    try {
-      const res = await fetch(`${this.supabaseUrl}/rest/v1/rpc/process_pos_checkout`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          apikey: this.anonKey,
-          Authorization: `Bearer ${this.anonKey}`,
-        },
-        body: JSON.stringify(payload),
-      })
-      if (!res.ok) {
-        const text = await res.text()
-        return { ok: false, error: text || `HTTP ${res.status}` }
-      }
-      return { ok: true }
-    } catch (error) {
-      return {
-        ok: false,
-        error: error instanceof Error ? error.message : "Koneksi Supabase gagal",
-      }
-    }
-  }
 }
 
 export function createRepository(): KalaPOSRepository {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-  if (url && anonKey) {
-    return new SupabaseAdapter(url, anonKey)
+  const publicKey =
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  if (url && publicKey) {
+    return new SupabaseAdapter()
   }
   return new LocalPersistenceAdapter()
 }

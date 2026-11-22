@@ -16,7 +16,7 @@ export async function GET() {
     return NextResponse.json({ ok: false, error: "Autentikasi diperlukan." }, { status: 401 })
   }
 
-  const all = listAllUsersSanitized()
+  const all = await listAllUsersSanitized()
   if (session.role === "OWNER") {
     return NextResponse.json({ ok: true, users: all }, { status: 200 })
   }
@@ -53,7 +53,7 @@ export async function POST(request: NextRequest) {
       pin?: string
     }
 
-    if (!body.branchId || !findActiveBranchServer(body.branchId)) {
+    if (!body.branchId || !(await findActiveBranchServer(body.branchId))) {
       return NextResponse.json(
         { ok: false, error: "Cabang penugasan tidak ditemukan atau belum aktif." },
         { status: 400 }
@@ -67,7 +67,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const res = createStaffAccountServer({
+    const res = await createStaffAccountServer({
       fullName: body.fullName ?? "",
       email: body.email ?? "",
       password: body.password ?? "",
@@ -106,7 +106,7 @@ export async function PATCH(request: NextRequest) {
     if (!body.userId) {
       return NextResponse.json({ ok: false, error: "ID staf wajib diisi." }, { status: 400 })
     }
-    const res = toggleStaffActiveServer(body.userId)
+    const res = await toggleStaffActiveServer(body.userId)
     if (!res.ok) {
       return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
     }
@@ -133,7 +133,7 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ ok: false, error: "ID staf wajib diisi." }, { status: 400 })
   }
 
-  const res = deleteStaffAccountServer(userId)
+  const res = await deleteStaffAccountServer(userId)
   if (!res.ok) {
     return NextResponse.json({ ok: false, error: res.error }, { status: 400 })
   }

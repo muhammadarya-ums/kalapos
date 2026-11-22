@@ -56,7 +56,7 @@ export async function POST(request: NextRequest) {
           { status: 400 }
         )
       }
-      const res = verifyEmailCredentials(body.email, body.password)
+      const res = await verifyEmailCredentials(body.email, body.password)
       if (!res.ok) {
         recordAuthFailure(rateKey)
         return NextResponse.json({ ok: false, error: res.error }, { status: 401 })
@@ -71,14 +71,14 @@ export async function POST(request: NextRequest) {
           { status: 400 }
         )
       }
-      const activeBranch = findActiveBranchServer(branchId)
+      const activeBranch = await findActiveBranchServer(branchId)
       if (!activeBranch) {
         return NextResponse.json(
           { ok: false, error: "Cabang yang dipilih tidak ditemukan atau sedang nonaktif." },
           { status: 400 }
         )
       }
-      const res = verifyPinCredentials(typeof body.pin === "string" ? body.pin : "", branchId)
+      const res = await verifyPinCredentials(typeof body.pin === "string" ? body.pin : "", branchId)
       if (!res.ok) {
         recordAuthFailure(rateKey)
         return NextResponse.json({ ok: false, error: res.error }, { status: 401 })
@@ -89,7 +89,7 @@ export async function POST(request: NextRequest) {
 
     // Non-owner staff must belong to an active branch of Kafe Kala
     if (matchedUser.role !== "OWNER") {
-      if (!matchedUser.branch_id || !findActiveBranchServer(matchedUser.branch_id)) {
+      if (!matchedUser.branch_id || !(await findActiveBranchServer(matchedUser.branch_id))) {
         return NextResponse.json(
           {
             ok: false,

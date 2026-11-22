@@ -131,7 +131,7 @@ export function QueueBoard() {
   }, [queuedOrders, soundEnabled])
 
   const handleAdvance = useCallback(
-    (order: Order) => {
+    async (order: Order) => {
       const nextMap: Partial<Record<OrderStatus, OrderStatus>> = {
         QUEUED: "PREPARING",
         PREPARING: "READY",
@@ -139,7 +139,7 @@ export function QueueBoard() {
       }
       const next = nextMap[order.status]
       if (!next) return
-      const res = advanceOrderStatus(order.id, next)
+      const res = await advanceOrderStatus(order.id, next)
       if (res.ok) {
         const label =
           next === "PREPARING"
@@ -148,6 +148,8 @@ export function QueueBoard() {
             ? "siap diambil"
             : "selesai diarsipkan"
         toast(`Tiket #${order.queue_number} ${label}.`)
+      } else {
+        toast(res.error || "Gagal memperbarui status antrean.", "error")
       }
     },
     [advanceOrderStatus, toast]
