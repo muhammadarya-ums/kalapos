@@ -21,16 +21,27 @@ const jetBrainsMono = JetBrains_Mono({
 })
 
 export const metadata: Metadata = {
-  title: "KalaPOS — Sistem Kasir & Operasional Internal Kafe Kala",
+  title: "KalaPOS - Sistem Kasir & Operasional Internal Kafe Kala",
   description:
     "Sistem POS internal Kafe Kala untuk pengelolaan cabang oleh Owner, kasir, antrean barista real-time, dan laporan omset arus kas.",
   icons: {
     icon: [
-      { url: "/icon-light-32x32.png", media: "(prefers-color-scheme: light)" },
-      { url: "/icon-dark-32x32.png", media: "(prefers-color-scheme: dark)" },
-      { url: "/icon.svg", type: "image/svg+xml" },
+      {
+        url: "/icon-light-32x32.png?v=kala1",
+        media: "(prefers-color-scheme: light)",
+        sizes: "32x32",
+        type: "image/png",
+      },
+      {
+        url: "/icon-dark-32x32.png?v=kala1",
+        media: "(prefers-color-scheme: dark)",
+        sizes: "32x32",
+        type: "image/png",
+      },
+      { url: "/icon.svg?v=kala1", type: "image/svg+xml" },
     ],
-    apple: "/apple-icon.png",
+    shortcut: "/favicon.ico?v=kala1",
+    apple: [{ url: "/apple-icon.png?v=kala1", sizes: "180x180", type: "image/png" }],
   },
 }
 
